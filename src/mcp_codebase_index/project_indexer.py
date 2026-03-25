@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from mcp_codebase_index.annotator import annotate
@@ -115,25 +116,33 @@ class ProjectIndexer:
         file_paths = self._discover_files()
         logger.info("Discovered %d files in %s", len(file_paths), self.root_path)
 
-        # Step 2: annotate each file
+        # Step 2: annotate each file (parallel I/O + annotation)
         files: dict[str, StructuralMetadata] = {}
         total_lines = 0
         total_functions = 0
         total_classes = 0
 
-        for fpath in file_paths:
+        def _annotate_file(fpath: str) -> tuple[str, StructuralMetadata] | None:
             rel_path = os.path.relpath(fpath, self.root_path)
             try:
                 source = self._read_file(fpath)
             except (OSError, UnicodeDecodeError) as e:
                 logger.warning("Skipping %s: %s", rel_path, e)
-                continue
+                return None
+            return rel_path, annotate(source, source_name=rel_path)
 
-            metadata = annotate(source, source_name=rel_path)
-            files[rel_path] = metadata
-            total_lines += metadata.total_lines
-            total_functions += len(metadata.functions)
-            total_classes += len(metadata.classes)
+        max_workers = min(32, (os.cpu_count() or 1) * 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_annotate_file, fpath): fpath for fpath in file_paths}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is None:
+                    continue
+                rel_path, metadata = result
+                files[rel_path] = metadata
+                total_lines += metadata.total_lines
+                total_functions += len(metadata.functions)
+                total_classes += len(metadata.classes)
 
         # Step 3: build global symbol table
         symbol_table = self._build_symbol_table(files)
@@ -755,6 +764,9 @@ class ProjectIndexer:
                 end_idx = func.line_range.end  # exclusive
                 body_text = " ".join(metadata.lines[start_idx:end_idx])
                 for local_name, resolved_name in imported_names.items():
+                    # fast path: skip regex if the name isn't even in the text
+                    if local_name not in body_text:
+                        continue
                     if re.search(r'\b' + re.escape(local_name) + r'\b', body_text):
                         if resolved_name != func_qualified:
                             global_graph[func_qualified].add(resolved_name)
@@ -769,6 +781,9 @@ class ProjectIndexer:
                 end_idx = cls.line_range.end
                 body_text = " ".join(metadata.lines[start_idx:end_idx])
                 for local_name, resolved_name in imported_names.items():
+                    # fast path: skip regex if the name isn't even in the text
+                    if local_name not in body_text:
+                        continue
                     if re.search(r'\b' + re.escape(local_name) + r'\b', body_text):
                         if resolved_name != cls_qualified:
                             global_graph[cls_qualified].add(resolved_name)
