@@ -147,9 +147,20 @@ claude mcp add token-savior -- /path/to/venv/bin/token-savior
 ```bash
 git clone https://github.com/Mibayy/token-savior
 cd token-savior
-python3 -m venv .venv
-.venv/bin/pip install -e ".[mcp,dev]"
-pytest tests/ -q
+uv sync --extra mcp --extra dev
+uv run pytest tests/ -q
+```
+
+Wire the local checkout into Claude Code:
+
+```bash
+claude mcp add token-savior -- uv --directory /path/to/token-savior run token-savior
+```
+
+### Prompt the agent like this in your instructions markdown
+
+```
+Prefer token-savior MCP tools over Read/Grep/Glob for all codebase navigation (symbols, search, call graphs, impact analysis).
 ```
 
 ### Configure
